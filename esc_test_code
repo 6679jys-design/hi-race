@@ -1,0 +1,110 @@
+#include <Arduino.h>
+#include <Servo.h>
+
+// 핀 정의
+#define SERVO_PIN    9
+#define ESC_PIN      10
+#define SENSOR_COUNT 5
+const int sensorPins[SENSOR_COUNT] = {A0, A1, A2, A3, A4};
+
+// 조향 설정 (제공해주신 코드 기준)
+#define SERVO_CENTER 90
+#define SERVO_LEFT   60   // 더 많이 꺾어야 한다면 45 정도로 조정 가능
+#define SERVO_RIGHT  120  // 더 많이 꺾어야 한다면 135 정도로 조정 가능
+
+// 전역 변수
+Servo steeringServo;
+Servo motorESC;
+
+int sensorMin[5] = {1023, 1023, 1023, 1023, 1023};
+int sensorMax[5] = {0, 0, 0, 0, 0};
+int threshold[5];
+int lastDirection = 0; // -1: 좌, 1: 우
+
+// ESC 속도 설정
+const int SPEED_STOP    = 90;
+const int SPEED_FORWARD = 96; // 환경에 맞춰 95~100 사이 조정
+const int SPEED_SEARCH  = 94;
+
+void setup() {
+  Serial.begin(9600);
+  
+  steeringServo.attach(SERVO_PIN);
+  motorESC.attach(ESC_PIN);
+  
+  // 1. ESC 초기화
+  motorESC.write(SPEED_STOP);
+  delay(2000); 
+
+  // 2. 캘리브레이션 (5초 동안 센서를 라인 위에서 움직여주세요)
+  Serial.println("Calibration Start...");
+  unsigned long start = millis();
+  while (millis() - start < 5000) {
+    for (int i = 0; i < SENSOR_COUNT; i++) {
+      int val = analogRead(sensorPins[i]);
+      if (val < sensorMin[i]) sensorMin[i] = val;
+      if (val > sensorMax[i]) sensorMax[i] = val;
+    }
+    // 상태 표시용 조향 흔들기
+    steeringServo.write(SERVO_CENTER + (millis() % 200 > 100 ? 5 : -5));
+  }
+  
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    threshold[i] = (sensorMin[i] + sensorMax[i]) / 2;
+  }
+  
+  steeringServo.write(SERVO_CENTER);
+  Serial.println("Calibration Done!");
+}
+
+void loop() {
+  int s[5];
+  long sumWeights = 0;
+  int activeCount = 0;
+
+  // 각 센서의 가중치 정의 (왼쪽 끝 -200 ~ 오른쪽 끝 +200)
+  int weights[5] = {-200, -100, 0, 100, 200};
+
+  // 1. 센서 값 읽기
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    if (analogRead(sensorPins[i]) > threshold[i]) { // 검은선 감지
+      s[i] = 1;
+      sumWeights += weights[i];
+      activeCount++;
+    } else {
+      s[i] = 0;
+    }
+  }
+
+  // 2. 주행 및 조향 로직
+  if (activeCount > 0) {
+    // 선이 하나라도 감지됨
+    motorESC.write(SPEED_FORWARD);
+
+    // 가중치 평균 계산 (라인의 중심이 어디인가?)
+    float linePosition = (float)sumWeights / activeCount; 
+
+    // 라인 위치(-200 ~ 200)를 서보 각도로 변환
+    // 90도를 기준으로 linePosition에 비례해서 꺾음
+    // 0.15는 조향 감도(Gain). 1개를 가렸을 때 더 꺾고 싶으면 이 값을 높이세요 (예: 0.2)
+    int angle = SERVO_CENTER + (int)(linePosition * 0.15); 
+    
+    // 범위 제한 (제공하신 60~120도 사이)
+    angle = constrain(angle, SERVO_LEFT, SERVO_RIGHT);
+    steeringServo.write(angle);
+
+    // 마지막 방향 기록 (나중에 선을 놓쳤을 때 사용)
+    if (linePosition < -50) lastDirection = -1;
+    else if (linePosition > 50) lastDirection = 1;
+
+  } else {
+    // 3. 선을 놓침 (Search 로직)
+    motorESC.write(SPEED_SEARCH);
+    
+    if (lastDirection == -1) {
+      steeringServo.write(SERVO_LEFT); // 놓친 방향으로 끝까지 꺾음
+    } else if (lastDirection == 1) {
+      steeringServo.write(SERVO_RIGHT);
+    }
+  }
+}
